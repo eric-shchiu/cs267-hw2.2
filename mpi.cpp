@@ -19,7 +19,7 @@ std::vector<particle_t> local_particles;
 std::vector<particle_t> ghost_particles;
 
 // Neighbor process mapping
-enum Neighbor { LEFT, RIGHT, TOP, BOTTOM, TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT };
+enum NeighborDir { LEFT, RIGHT, TOP, BOTTOM, TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT };
 int neighbors[8] = { -1 };
 
 // Apply the force from neighbor to particle
@@ -67,7 +67,7 @@ void move(particle_t& p, double size) {
 void create_mpi_particle_type() {
     static_assert(std::is_pod<particle_t>::value, "particle_t must be a POD type");
 
-    const int num_fields = 6;
+    constexpr int num_fields = 6;
     MPI_Datatype types[num_fields] = { 
         MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE, 
         MPI_DOUBLE, MPI_DOUBLE, MPI_INT 
@@ -107,17 +107,17 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
     sub_ymax = (my_row == grid_rows-1) ? size : sub_ymin + sub_h;
 
     // Initialize neighbor processes
-    neighbors[LEFT]        = (my_col > 0)       ? rank - 1 : -1;
-    neighbors[RIGHT]       = (my_col < grid_cols-1) ? rank + 1 : -1;
-    neighbors[TOP]         = (my_row > 0)       ? rank - grid_cols : -1;
-    neighbors[BOTTOM]      = (my_row < grid_rows-1) ? rank + grid_cols : -1;
-    neighbors[TOP_LEFT]    = (my_col > 0 && my_row > 0) ? rank - grid_cols - 1 : -1;
-    neighbors[TOP_RIGHT]   = (my_col < grid_cols-1 && my_row > 0) ? rank - grid_cols + 1 : -1;
-    neighbors[BOTTOM_LEFT] = (my_col > 0 && my_row < grid_rows-1) ? rank + grid_cols - 1 : -1;
-    neighbors[BOTTOM_RIGHT]= (my_col < grid_cols-1 && my_row < grid_rows-1) ? rank + grid_cols + 1 : -1;
+    neighbors[LEFT]         = (my_col > 0)       ? rank - 1 : -1;
+    neighbors[RIGHT]        = (my_col < grid_cols-1) ? rank + 1 : -1;
+    neighbors[TOP]          = (my_row > 0)       ? rank - grid_cols : -1;
+    neighbors[BOTTOM]       = (my_row < grid_rows-1) ? rank + grid_cols : -1;
+    neighbors[TOP_LEFT]     = (my_col > 0 && my_row > 0) ? rank - grid_cols - 1 : -1;
+    neighbors[TOP_RIGHT]    = (my_col < grid_cols-1 && my_row > 0) ? rank - grid_cols + 1 : -1;
+    neighbors[BOTTOM_LEFT]  = (my_col > 0 && my_row < grid_rows-1) ? rank + grid_cols - 1 : -1;
+    neighbors[BOTTOM_RIGHT] = (my_col < grid_cols-1 && my_row < grid_rows-1) ? rank + grid_cols + 1 : -1;
 
     // Distribute initial particles
-    for(int i=0; i<num_parts; ++i) {
+    for(int i = 0; i < num_parts; ++i) {
         const auto& p = parts[i];
         if(p.x >= sub_xmin && p.x < sub_xmax &&
            p.y >= sub_ymin && p.y < sub_ymax) {
@@ -127,12 +127,14 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 }
 
 void exchange_particles(int rank) {
-    const int tag = 0;
-    MPI_Request send_reqs[8], recv_reqs[8];
-    std::vector<particle_t> send_buf[8], recv_buf[8];
+    constexpr int tag = 0;
+    MPI_Request send_reqs[8] = {MPI_REQUEST_NULL};
+    MPI_Request recv_reqs[8] = {MPI_REQUEST_NULL};
+    std::vector<particle_t> send_buf[8];
+    std::vector<particle_t> recv_buf[8];
 
     // Prepare send buffers
-    for(auto it=local_particles.begin(); it!=local_particles.end();) {
+    for(auto it = local_particles.begin(); it != local_particles.end();) {
         particle_t& p = *it;
         int dir = -1;
 
@@ -157,26 +159,34 @@ void exchange_particles(int rank) {
         }
     }
 
-    // Initiate non-blocking communication
-    for(int dir=0; dir<8; ++dir) {
-        if(neighbors[dir] == -1) continue;
-
+    // Initiate non-blocking sends
+    for(int dir = 0; dir < 8; ++dir) {
+        if(neighbors[dir] == -1 || send_buf[dir].empty()) continue;
+        
         MPI_Isend(send_buf[dir].data(), send_buf[dir].size(),
-                 MPI_PARTICLE_TYPE, neighbors[dir], tag, MPI_COMM_WORLD, &send_reqs[dir]);
+                 MPI_PARTICLE_TYPE, neighbors[dir], tag, 
+                 MPI_COMM_WORLD, &send_reqs[dir]);
+    }
+
+    // Initiate non-blocking receives
+    for(int dir = 0; dir < 8; ++dir) {
+        if(neighbors[dir] == -1) continue;
 
         MPI_Status probe_status;
         MPI_Probe(neighbors[dir], tag, MPI_COMM_WORLD, &probe_status);
         int recv_count;
         MPI_Get_count(&probe_status, MPI_PARTICLE_TYPE, &recv_count);
-        recv_buf[dir].resize(recv_count);
         
-        MPI_Irecv(recv_buf[dir].data(), recv_count, MPI_PARTICLE_TYPE,
-                 neighbors[dir], tag, MPI_COMM_WORLD, &recv_reqs[dir]);
+        if(recv_count > 0) {
+            recv_buf[dir].resize(recv_count);
+            MPI_Irecv(recv_buf[dir].data(), recv_count, MPI_PARTICLE_TYPE,
+                     neighbors[dir], tag, MPI_COMM_WORLD, &recv_reqs[dir]);
+        }
     }
 
     // Process received particles
-    for(int dir=0; dir<8; ++dir) {
-        if(neighbors[dir] == -1) continue;
+    for(int dir = 0; dir < 8; ++dir) {
+        if(neighbors[dir] == -1 || recv_reqs[dir] == MPI_REQUEST_NULL) continue;
 
         MPI_Wait(&recv_reqs[dir], MPI_STATUS_IGNORE);
         for(auto& p : recv_buf[dir]) {
@@ -189,9 +199,16 @@ void exchange_particles(int rank) {
         }
     }
 
-    // Ensure all sends complete
-    MPI_Waitall(8, send_reqs, MPI_STATUSES_IGNORE);
+    // Complete outstanding sends
+    for(int dir = 0; dir < 8; ++dir) {
+        if(send_reqs[dir] != MPI_REQUEST_NULL) {
+            MPI_Wait(&send_reqs[dir], MPI_STATUS_IGNORE);
+        }
+    }
 }
+
+// Rest of the code remains the same as previous version (simulate_one_step, gather_for_save)
+// ... [Keep the same implementation for other functions]
 
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
     // Combine local and ghost particles
