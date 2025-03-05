@@ -17,58 +17,35 @@ static double right_outer_margin, left_outer_margin, up_outer_margin, down_outer
 static double right_inner_margin, left_inner_margin, up_inner_margin, down_inner_margin;
 
 // Particle storage
-std::vector<particle_t> local_particles;
-std::vector<particle_t> ghost_particles;
+std::vector<particle_t> local_particles;    // Particles owned by this process
+std::vector<particle_t> ghost_particles;    // Ghost particles from neighbors
+std::vector<particle_t> combined_particles; // Temporary storage during communication
 
-// Neighbor process mapping (Considering 4 directions)
-enum NeighborDir { RIGHT = 0, TOP_RIGHT = 1, TOP = 2, TOP_LEFT = 3 ,
-                   LEFT = 4, BOTTOM_LEFT = 5, BOTTOM = 6, BOTTOM_RIGHT = 7 };
-int neighbors[8] = { -1, -1, -1, -1, -1, -1, -1, -1}; // Initialize to -1 (no neighbor)
+// Neighbor process mapping
+enum NeighborDir { 
+    RIGHT = 0, TOP_RIGHT = 1, TOP = 2, TOP_LEFT = 3,
+    LEFT = 4, BOTTOM_LEFT = 5, BOTTOM = 6, BOTTOM_RIGHT = 7 
+};
+int neighbors[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 
-// Apply the force from neighbor to particle
-void apply_force(particle_t& particle, particle_t& neighbor) {
-    // Calculate Distance
-    double dx = neighbor.x - particle.x;
-    double dy = neighbor.y - particle.y;
-    double r2 = dx * dx + dy * dy;
-
-    // Check if the two particles should interact
-    if (r2 > cutoff * cutoff)
-        return;
-
-    r2 = fmax(r2, min_r * min_r);
-    double r = sqrt(r2);
-
-    // Very simple short-range repulsive force
-    double coef = (1 - cutoff / r) / r2 / mass;
-    particle.ax += coef * dx;
-    particle.ay += coef * dy;
+// Helper functions for particle classification
+bool is_local(const particle_t& p) {
+    return (p.x >= sub_xmin) && (p.x < sub_xmax) &&
+           (p.y >= sub_ymin) && (p.y < sub_ymax);
 }
 
-// Integrate the ODE
-void move(particle_t& p, double size) {
-    // Slightly simplified Velocity Verlet integration
-    // Conserves energy better than explicit Euler method
-    p.vx += p.ax * dt;
-    p.vy += p.ay * dt;
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-
-    // Bounce from walls
-    while (p.x < 0 || p.x > size) {
-        p.x = p.x < 0 ? -p.x : 2 * size - p.x;
-        p.vx = -p.vx;
-    }
-
-    while (p.y < 0 || p.y > size) {
-        p.y = p.y < 0 ? -p.y : 2 * size - p.y;
-        p.vy = -p.vy;
-    }
+bool is_combined(const particle_t& p) {
+    return (p.x >= left_outer_margin) && (p.x < right_outer_margin) &&
+           (p.y >= up_outer_margin) && (p.y < down_outer_margin);
 }
 
-// Create MPI particle type with proper offset handling
+bool in_ghost_zone(const particle_t& p) {
+    return is_combined(p) && !is_local(p);
+}
+
+// Create MPI particle type
 void create_mpi_particle_type() {
-    static_assert(std::is_pod<particle_t>::value, "particle_t must be a POD type");
+    static_assert(std::is_pod<particle_t>::value, "particle_t must be POD");
 
     constexpr int num_fields = 7;
     MPI_Datatype types[num_fields] = { 
@@ -91,6 +68,7 @@ void create_mpi_particle_type() {
     MPI_Type_commit(&MPI_PARTICLE_TYPE);
 }
 
+// Determine optimal grid decomposition
 void determine_grid_dimensions(int num_procs, int &grid_rows, int &grid_cols) {
     int sqrt_p = static_cast<int>(sqrt(num_procs));
     int best_rows = 1, best_cols = num_procs;
@@ -118,13 +96,29 @@ void determine_grid_dimensions(int num_procs, int &grid_rows, int &grid_cols) {
     grid_cols = best_cols;
 }
 
+// Classify particles after communication
+void classify_particles() {
+    std::vector<particle_t> new_local, new_ghost;
+    
+    for(auto& p : combined_particles) {
+        if(is_local(p)) {
+            new_local.push_back(p);
+        } else if(in_ghost_zone(p)) {
+            new_ghost.push_back(p);
+        }
+        // Particles outside both zones are discarded
+    }
+
+    local_particles = std::move(new_local);
+    ghost_particles = std::move(new_ghost);
+}
+
+// Initialize simulation domain and neighbors
 void init_simulation(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
     create_mpi_particle_type();
-
-    // Create 2D process grid
+    
+    // Create 2D process grid (row-major order)
     determine_grid_dimensions(num_procs, grid_rows, grid_cols);
-
-    // Calculate process coordinates
     my_row = rank / grid_cols;
     my_col = rank % grid_cols;
 
@@ -136,16 +130,16 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
     sub_ymin = my_row * sub_h;
     sub_ymax = (my_row == grid_rows-1) ? size : sub_ymin + sub_h;
 
-    // Calculate the ghost particle boundaries
+    // Calculate communication margins
     right_outer_margin = sub_xmax + cutoff;
-    left_outer_margin  = sub_xmin - cutoff;
-    down_outer_margin  = sub_ymax + cutoff;
-    up_outer_margin    = sub_ymin - cutoff;
+    left_outer_margin = sub_xmin - cutoff;
+    down_outer_margin = sub_ymax + cutoff;
+    up_outer_margin = sub_ymin - cutoff;
 
-    left_inner_margin  = sub_xmin + cutoff;
     right_inner_margin = sub_xmax - cutoff;
-    up_inner_margin    = sub_ymin + cutoff;
-    down_inner_margin  = sub_ymax - cutoff;
+    left_inner_margin = sub_xmin + cutoff;
+    up_inner_margin = sub_ymin + cutoff;
+    down_inner_margin = sub_ymax - cutoff;
 
     // Initialize neighbor processes
     neighbors[LEFT]         = (my_col > 0)       ? rank - 1 : -1;
@@ -157,39 +151,32 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
     neighbors[BOTTOM_LEFT]  = (my_col > 0 && my_row < grid_rows-1) ? rank + grid_cols - 1 : -1;
     neighbors[BOTTOM_RIGHT] = (my_col < grid_cols-1 && my_row < grid_rows-1) ? rank + grid_cols + 1 : -1;
 
-    // Distribute initial particles
+    // Initial local particles and ghost particles
     local_particles.clear();
-    for(int i = 0; i < num_parts; ++i) {
-        const auto& p = parts[i];
-        if(p.x >= sub_xmin && p.x < sub_xmax &&
-           p.y >= sub_ymin && p.y < sub_ymax) {
-            local_particles.push_back(p);
-        }
-    }
-
-    // Initialize ghost particles
     ghost_particles.clear();
     for(int i = 0; i < num_parts; ++i) {
-        const auto& p = parts[i];
-        // If the particle's coordinates are between x:[left_outer_margin, right_outer_margin] and y:[up_outer_margin, down_outer_margin],
-        // and the particle's coordinates are not between x:[sub_outer_xmin, sub_outer_xmax] and y:[sub_outer_ymin, sub_outer_ymax], 
-        // it is considered a ghost particle
-        if((p.x >= left_outer_margin && p.x < right_outer_margin && p.y >= up_outer_margin && p.y < down_outer_margin) &&
-           !(p.x >= sub_xmin && p.x < sub_xmax && p.y >= sub_ymin && p.y < sub_ymax)) {
-            ghost_particles.push_back(p);
+        if(is_local(parts[i])) {
+            local_particles.push_back(parts[i]);
+        }
+        elif (in_ghost_zone(parts[i])) {
+            ghost_particles.push_back(parts[i]);
         }
     }
+
+    // Clear combined particles
+    combined_particles.clear();
 }
 
+// Particle exchange with neighbors
 void exchange_particles(int rank) {
     constexpr int tag = 0;
-    MPI_Request send_reqs[8] = {MPI_REQUEST_NULL};
-    MPI_Request recv_reqs[8] = {MPI_REQUEST_NULL};
+    MPI_Request send_reqs[8], recv_reqs[8];
     std::vector<particle_t> send_buf[8];
     std::vector<particle_t> recv_buf[8];
 
     // Prepare send buffers
-    for(auto it = local_particles.begin(); it != local_particles.end();) {
+    combined_particles = local_particles;
+    for(auto it = combined_particles.begin(); it != combined_particles.end();) {
         particle_t& p = *it;
 
         const bool left_outer = (p.x > left_outer_margin);
@@ -201,11 +188,6 @@ void exchange_particles(int rank) {
         const bool right_inner = (p.x >= right_inner_margin);
         const bool up_inner = (p.y < up_inner_margin);
         const bool down_inner = (p.y >= down_inner_margin);
-
-        if (!left_inner && !right_inner && !up_inner && !down_inner) {
-            ++it;
-            continue;
-        }
 
         if (right_inner && up_outer && down_outer && (neighbors[RIGHT] != -1)) {
             send_buf[RIGHT].push_back(p);
@@ -232,68 +214,68 @@ void exchange_particles(int rank) {
             send_buf[BOTTOM_RIGHT].push_back(p);
         }
 
-        if (!(p.x >= sub_xmin && p.x < sub_xmax &&
-              p.y >= sub_ymin && p.y < sub_ymax)) {
-            it = local_particles.erase(it);
-            continue;
+        if(!is_combined(p)) {
+            it = combined_particles.erase(it);
+        } else {
+            ++it;
         }
     }
 
-    // Initiate non-blocking sends
+    // Non-blocking sends
     for(int dir = 0; dir < 8; ++dir) {
         if(neighbors[dir] == -1 || send_buf[dir].empty()) continue;
         
         MPI_Isend(send_buf[dir].data(), send_buf[dir].size(),
-                 MPI_PARTICLE_TYPE, neighbors[dir], tag, 
+                 MPI_PARTICLE_TYPE, neighbors[dir], tag,
                  MPI_COMM_WORLD, &send_reqs[dir]);
     }
 
-    // Initiate non-blocking receives
+    // Non-blocking receives
     for(int dir = 0; dir < 8; ++dir) {
         if(neighbors[dir] == -1) continue;
 
-        MPI_Status probe_status;
-        MPI_Probe(neighbors[dir], tag, MPI_COMM_WORLD, &probe_status);
-        int recv_count;
-        MPI_Get_count(&probe_status, MPI_PARTICLE_TYPE, &recv_count);
+        MPI_Status status;
+        int count;
+        MPI_Probe(neighbors[dir], tag, MPI_COMM_WORLD, &status);
+        MPI_Get_count(&status, MPI_PARTICLE_TYPE, &count);
         
-        if(recv_count > 0) {
-            recv_buf[dir].resize(recv_count);
-            MPI_Irecv(recv_buf[dir].data(), recv_count, MPI_PARTICLE_TYPE,
+        if(count > 0) {
+            recv_buf[dir].resize(count);
+            MPI_Irecv(recv_buf[dir].data(), count, MPI_PARTICLE_TYPE,
                      neighbors[dir], tag, MPI_COMM_WORLD, &recv_reqs[dir]);
         }
     }
 
-    // Process received particles
+    // Process received data
     for(int dir = 0; dir < 8; ++dir) {
-        if(neighbors[dir] == -1 || recv_reqs[dir] == MPI_REQUEST_NULL) continue;
+        if(neighbors[dir] == -1) continue;
 
-        MPI_Wait(&recv_reqs[dir], MPI_STATUS_IGNORE);
-        for(auto& p : recv_buf[dir]) {
-            if(p.x >= sub_xmin && p.x < sub_xmax &&
-               p.y >= sub_ymin && p.y < sub_ymax) {
-                local_particles.push_back(p);
-            } else {
-                ghost_particles.push_back(p);
-            }
+        if(recv_buf[dir].size() > 0) {
+            MPI_Wait(&recv_reqs[dir], MPI_STATUS_IGNORE);
+            combined_particles.insert(combined_particles.end(),
+                                     recv_buf[dir].begin(),
+                                     recv_buf[dir].end());
         }
     }
 
-    // Complete outstanding sends
+    // Finalize sends
     for(int dir = 0; dir < 8; ++dir) {
-        if(send_reqs[dir] != MPI_REQUEST_NULL) {
+        if(neighbors[dir] != -1 && !send_buf[dir].empty()) {
             MPI_Wait(&send_reqs[dir], MPI_STATUS_IGNORE);
         }
     }
 }
 
+// Main simulation step
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    // Combine local and ghost particles
-    std::vector<particle_t> all_particles = local_particles;
-    all_particles.insert(all_particles.end(), ghost_particles.begin(), ghost_particles.end());
+    // Combine particles for computation
+    combined_particles = local_particles;
+    combined_particles.insert(combined_particles.end(),
+                             ghost_particles.begin(),
+                             ghost_particles.end());
 
     // Reset accelerations
-    for(auto& p : all_particles) {
+    for(auto& p : local_particles) {
         p.ax = p.ay = 0.0;
     }
 
@@ -303,14 +285,12 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
     const int bins_y = static_cast<int>((sub_ymax - sub_ymin)/bin_size) + 1;
     std::vector<std::vector<std::vector<int>>> bins(bins_x, std::vector<std::vector<int>>(bins_y));
 
-    // Populate bins using max/min instead of clamp
-    for(size_t i=0; i<all_particles.size(); ++i) {
-        const double rel_x = all_particles[i].x - sub_xmin;
-        const double rel_y = all_particles[i].y - sub_ymin;
-        int x = static_cast<int>(rel_x / bin_size);
-        int y = static_cast<int>(rel_y / bin_size);
-        x = std::max(0, std::min(x, bins_x-1));  // Replaced clamp with max/min
-        y = std::max(0, std::min(y, bins_y-1));  // Replaced clamp with max/min
+    // Populate bins
+    for(size_t i=0; i<combined_particles.size(); ++i) {
+        const double rel_x = combined_particles[i].x - sub_xmin;
+        const double rel_y = combined_particles[i].y - sub_ymin;
+        int x = std::max(0, std::min(static_cast<int>(rel_x/bin_size), bins_x-1));
+        int y = std::max(0, std::min(static_cast<int>(rel_y/bin_size), bins_y-1));
         bins[x][y].push_back(i);
     }
 
@@ -322,25 +302,24 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
             // Intra-bin interactions
             for(size_t i=0; i<bin.size(); ++i) {
                 for(size_t j=i+1; j<bin.size(); ++j) {
-                    particle_t& p1 = all_particles[bin[i]];
-                    particle_t& p2 = all_particles[bin[j]];
+                    particle_t& p1 = combined_particles[bin[i]];
+                    particle_t& p2 = combined_particles[bin[j]];
                     apply_force(p1, p2);
                     apply_force(p2, p1);
                 }
             }
-            
+
             // Inter-bin interactions
-            const int offsets[][2] = {{1,0}, {-1,0}, {0,1}, {0,-1}, 
-                                     {1,1}, {-1,1}, {1,-1}, {-1,-1}};
-            for(const auto& off : offsets) {
-                const int nx = x + off[0];
-                const int ny = y + off[1];
+            const int dx[] = {1, 1, 0, -1, -1, -1, 0, 1};
+            const int dy[] = {0, 1, 1, 1, 0, -1, -1, -1};
+            for(int d=0; d<8; ++d) {
+                const int nx = x + dx[d];
+                const int ny = y + dy[d];
                 if(nx >=0 && nx < bins_x && ny >=0 && ny < bins_y) {
                     for(auto i : bin) {
                         for(auto j : bins[nx][ny]) {
-                            if(i == j) continue;
-                            particle_t& p1 = all_particles[i];
-                            particle_t& p2 = all_particles[j];
+                            particle_t& p1 = combined_particles[i];
+                            particle_t& p2 = combined_particles[j];
                             apply_force(p1, p2);
                             apply_force(p2, p1);
                         }
@@ -350,26 +329,24 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
         }
     }
 
-    // Move local particles
+    // Move only local particles
     for(auto& p : local_particles) {
         move(p, size);
     }
 
-    // Exchange particles with neighbors
+    // Perform particle migration
     exchange_particles(rank);
-
-    // Clear ghost particles for next step
-    ghost_particles.clear();
+    classify_particles();
 }
 
-void gather_for_save(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
+// Data gathering for output
+void gather_for_save(particle_t* parts, int num_parts, double size, 
+                    int rank, int num_procs) {
     int local_count = local_particles.size();
     std::vector<int> counts(num_procs), displs(num_procs);
 
-    // Gather particle counts
     MPI_Gather(&local_count, 1, MPI_INT, counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Calculate displacements
     if(rank == 0) {
         displs[0] = 0;
         for(int i=1; i<num_procs; ++i) {
@@ -377,12 +354,10 @@ void gather_for_save(particle_t* parts, int num_parts, double size, int rank, in
         }
     }
 
-    // Gather all particles
     MPI_Gatherv(local_particles.data(), local_count, MPI_PARTICLE_TYPE,
                parts, counts.data(), displs.data(), MPI_PARTICLE_TYPE,
                0, MPI_COMM_WORLD);
 
-    // Sort particles by ID on root
     if(rank == 0) {
         std::sort(parts, parts + num_parts, 
             [](const particle_t& a, const particle_t& b) { return a.id < b.id; });
