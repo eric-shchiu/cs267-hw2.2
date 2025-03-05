@@ -199,7 +199,7 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
         if(is_local(parts[i])) {
             local_particles.push_back(parts[i]);
         }
-        elif (in_ghost_zone(parts[i])) {
+        else if (in_ghost_zone(parts[i])) {
             ghost_particles.push_back(parts[i]);
         }
     }
