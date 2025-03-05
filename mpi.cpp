@@ -6,9 +6,6 @@
 #include <cstddef>
 #include <type_traits>
 
-// Define MPI particle type
-MPI_Datatype MPI_PARTICLE_TYPE;
-
 // 2D decomposition parameters
 static int grid_rows, grid_cols;
 static int my_row, my_col;
@@ -84,31 +81,6 @@ void move(particle_t& p, double size) {
     }
 }
 
-// Create MPI particle type
-void create_mpi_particle_type() {
-    static_assert(std::is_pod<particle_t>::value, "particle_t must be POD");
-
-    constexpr int num_fields = 7;
-    MPI_Datatype types[num_fields] = { 
-        MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE, 
-        MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE, 
-        MPI_INT 
-    };
-    int block_lengths[num_fields] = {1, 1, 1, 1, 1, 1, 1};
-    MPI_Aint offsets[num_fields];
-
-    offsets[0] = offsetof(particle_t, x);
-    offsets[1] = offsetof(particle_t, y);
-    offsets[2] = offsetof(particle_t, vx);
-    offsets[3] = offsetof(particle_t, vy);
-    offsets[4] = offsetof(particle_t, ax);
-    offsets[5] = offsetof(particle_t, ay);
-    offsets[6] = offsetof(particle_t, id);
-
-    MPI_Type_create_struct(num_fields, block_lengths, offsets, types, &MPI_PARTICLE_TYPE);
-    MPI_Type_commit(&MPI_PARTICLE_TYPE);
-}
-
 // Determine optimal grid decomposition
 void determine_grid_dimensions(int num_procs, int &grid_rows, int &grid_cols) {
     int sqrt_p = static_cast<int>(sqrt(num_procs));
@@ -156,8 +128,6 @@ void classify_particles() {
 
 // Initialize simulation domain and neighbors
 void init_simulation(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    create_mpi_particle_type();
-    
     // Create 2D process grid (row-major order)
     determine_grid_dimensions(num_procs, grid_rows, grid_cols);
     my_row = rank / grid_cols;
@@ -267,7 +237,7 @@ void exchange_particles(int rank) {
         if(neighbors[dir] == -1 || send_buf[dir].empty()) continue;
         
         MPI_Isend(send_buf[dir].data(), send_buf[dir].size(),
-                 MPI_PARTICLE_TYPE, neighbors[dir], tag,
+                 PARTICLE, neighbors[dir], tag,
                  MPI_COMM_WORLD, &send_reqs[dir]);
     }
 
@@ -278,11 +248,11 @@ void exchange_particles(int rank) {
         MPI_Status status;
         int count;
         MPI_Probe(neighbors[dir], tag, MPI_COMM_WORLD, &status);
-        MPI_Get_count(&status, MPI_PARTICLE_TYPE, &count);
+        MPI_Get_count(&status, PARTICLE, &count);
         
         if(count > 0) {
             recv_buf[dir].resize(count);
-            MPI_Irecv(recv_buf[dir].data(), count, MPI_PARTICLE_TYPE,
+            MPI_Irecv(recv_buf[dir].data(), count, PARTICLE,
                      neighbors[dir], tag, MPI_COMM_WORLD, &recv_reqs[dir]);
         }
     }
@@ -381,8 +351,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 }
 
 // Data gathering for output
-void gather_for_save(particle_t* parts, int num_parts, double size, 
-                    int rank, int num_procs) {
+void gather_for_save(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
     int local_count = local_particles.size();
     std::vector<int> counts(num_procs), displs(num_procs);
 
@@ -395,8 +364,8 @@ void gather_for_save(particle_t* parts, int num_parts, double size,
         }
     }
 
-    MPI_Gatherv(local_particles.data(), local_count, MPI_PARTICLE_TYPE,
-               parts, counts.data(), displs.data(), MPI_PARTICLE_TYPE,
+    MPI_Gatherv(local_particles.data(), local_count, PARTICLE,
+               parts, counts.data(), displs.data(), PARTICLE,
                0, MPI_COMM_WORLD);
 
     if(rank == 0) {
