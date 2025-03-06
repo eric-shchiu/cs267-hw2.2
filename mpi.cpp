@@ -284,14 +284,18 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 
     // 分箱参数设置
     const double bin_size = cutoff;
-    const int bins_x = static_cast<int>((sub_xmax - sub_xmin) / bin_size) + 1;
-    const int bins_y = static_cast<int>((sub_ymax - sub_ymin) / bin_size) + 1;
+    // const int bins_x = static_cast<int>((sub_xmax - sub_xmin) / bin_size) + 1;
+    // const int bins_y = static_cast<int>((sub_ymax - sub_ymin) / bin_size) + 1;
+    const int bins_x = static_cast<int>((right_outer_margin - left_outer_margin) / bin_size) + 1;
+    const int bins_y = static_cast<int>((down_outer_margin - up_outer_margin) / bin_size) + 1;
     std::vector<std::vector<std::vector<int>>> bins(bins_x, std::vector<std::vector<int>>(bins_y));
 
     // 将粒子分配到分箱结构中
     for (size_t i = 0; i < combined_particles.size(); ++i) {
-        const double rel_x = combined_particles[i].x - sub_xmin;
-        const double rel_y = combined_particles[i].y - sub_ymin;
+        // const double rel_x = combined_particles[i].x - sub_xmin;
+        // const double rel_y = combined_particles[i].y - sub_ymin;
+        const double rel_x = combined_particles[i].x - left_outer_margin;
+        const double rel_y = combined_particles[i].y - up_outer_margin;
         int x_bin = std::max(0, std::min(static_cast<int>(rel_x / bin_size), bins_x - 1));
         int y_bin = std::max(0, std::min(static_cast<int>(rel_y / bin_size), bins_y - 1));
         bins[x_bin][y_bin].push_back(i);
@@ -308,17 +312,6 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
                 particle_t& p1 = combined_particles[idx_i];
                 const bool p1_is_local = idx_i < local_count;
 
-                // 与同一分箱中后续粒子的相互作用
-                for (size_t j = i + 1; j < current_bin.size(); ++j) {
-                    const int idx_j = current_bin[j];
-                    particle_t& p2 = combined_particles[idx_j];
-                    const bool p2_is_local = idx_j < local_count;
-
-                    // 仅当受力方是本地粒子时才施加力
-                    if (p1_is_local) apply_force(p1, p2);
-                    if (p2_is_local) apply_force(p2, p1);
-                }
-
                 // 与相邻8个分箱的粒子相互作用
                 const int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
                 const int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
@@ -334,6 +327,17 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
                             if (p1_is_local) apply_force(p1, p2);
                         }
                     }
+                }
+
+                // 与同一分箱中后续粒子的相互作用
+                for (size_t j = i + 1; j < current_bin.size(); ++j) {
+                    const int idx_j = current_bin[j];
+                    particle_t& p2 = combined_particles[idx_j];
+                    const bool p2_is_local = idx_j < local_count;
+
+                    // 仅当受力方是本地粒子时才施加力
+                    if (p1_is_local) apply_force(p1, p2);
+                    if (p2_is_local) apply_force(p2, p1);
                 }
             }
         }
