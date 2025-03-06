@@ -270,25 +270,25 @@ void exchange_particles(int rank) {
 
 // Main simulation step
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    // 合并本地粒子和幽灵粒子进行计算
+    // combined the local particles and ghost particles for computation
     combined_particles = local_particles;
     combined_particles.insert(combined_particles.end(),
                              ghost_particles.begin(),
                              ghost_particles.end());
     const size_t local_count = local_particles.size();
 
-    // 重置本地粒子的加速度
+    // Reset acceleration for local particles
     for (auto& p : local_particles) {
         p.ax = p.ay = 0.0;
     }
 
-    // 分箱参数设置
+    // setup the binning parameters
     const double bin_size = cutoff;
     const int bins_x = static_cast<int>((sub_xmax - sub_xmin) / bin_size) + 1;
     const int bins_y = static_cast<int>((sub_ymax - sub_ymin) / bin_size) + 1;
     std::vector<std::vector<std::vector<int>>> bins(bins_x, std::vector<std::vector<int>>(bins_y));
 
-    // 将粒子分配到分箱结构中
+    // asign particles to bins
     for (size_t i = 0; i < combined_particles.size(); ++i) {
         const double rel_x = combined_particles[i].x - sub_xmin;
         const double rel_y = combined_particles[i].y - sub_ymin;
@@ -297,29 +297,30 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
         bins[x_bin][y_bin].push_back(i);
     }
 
-    // 力计算逻辑
+    // compute the forces
     for (int x = 0; x < bins_x; ++x) {
         for (int y = 0; y < bins_y; ++y) {
             auto& current_bin = bins[x][y];
 
-            // 同一分箱内的粒子相互作用
+            // go through all the particles in the bin
             for (size_t i = 0; i < current_bin.size(); ++i) {
                 const int idx_i = current_bin[i];
                 particle_t& p1 = combined_particles[idx_i];
                 const bool p1_is_local = idx_i < local_count;
+                if (!p1_is_local) continue;
 
-                // 与同一分箱中后续粒子的相互作用
+                // calculate the force within one bin
                 for (size_t j = i + 1; j < current_bin.size(); ++j) {
                     const int idx_j = current_bin[j];
                     particle_t& p2 = combined_particles[idx_j];
                     const bool p2_is_local = idx_j < local_count;
 
-                    // 仅当受力方是本地粒子时才施加力
-                    if (p2_is_local) apply_force(p1, p2);
-                    if (p1_is_local) apply_force(p2, p1);
+                    // only apply force when the force receiver is a local particle
+                    apply_force(p1, p2);
+                    if (p2_is_local) apply_force(p2, p1);
                 }
 
-                // 与相邻8个分箱的粒子相互作用
+                // particles form the neighboring 8 bins apply force to the particles in current bin
                 const int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
                 const int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
                 for (int d = 0; d < 8; ++d) {
@@ -330,8 +331,8 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
                             particle_t& p2 = combined_particles[idx_j];
                             const bool p2_is_local = idx_j < local_count;
 
-                            // 仅当受力方是本地粒子时施加力
-                            if (p1_is_local) apply_force(p1, p2);
+                            // Only apply force when the force receiver is a local particle
+                            apply_force(p1, p2);
                         }
                     }
                 }
@@ -339,7 +340,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
         }
     }
 
-    // 仅移动本地粒子
+    // only move local particles
     for (auto& p : local_particles) {
         move(p, size);
     }
