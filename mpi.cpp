@@ -1,9 +1,12 @@
 #include "common.h"
 #include <mpi.h>
 #include <cmath>
-#include <vector>
+#include <cstddef>
+#include <type_traits>
+#include <iostream>
 
-// Put any static global variables here that you will use throughout the simulation.
+// // Define MPI particle type
+// MPI_Datatype MPI_PARTICLE_TYPE;
 
 static double bin_size = cutoff; // bin size equals cutoff
 static int num_bins_x, num_bins_y;
@@ -50,22 +53,137 @@ void move(particle_t& p, double size) {
     }
 }
 
+// // Create MPI particle type
+// void create_mpi_particle_type() {
+//     // static_assert(std::is_pod<particle_t>::value, "particle_t must be POD");
+
+//     // constexpr int num_fields = 7;
+//     // MPI_Datatype types[num_fields] = { 
+//     //     MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE, 
+//     //     MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE, 
+//     //     MPI_INT 
+//     // };
+//     // int block_lengths[num_fields] = {1, 1, 1, 1, 1, 1, 1};
+//     // MPI_Aint offsets[num_fields];
+
+//     // offsets[0] = offsetof(particle_t, x);
+//     // offsets[1] = offsetof(particle_t, y);
+//     // offsets[2] = offsetof(particle_t, vx);
+//     // offsets[3] = offsetof(particle_t, vy);
+//     // offsets[4] = offsetof(particle_t, ax);
+//     // offsets[5] = offsetof(particle_t, ay);
+//     // offsets[6] = offsetof(particle_t, id);
+
+//     // MPI_Type_create_struct(num_fields, block_lengths, offsets, types, &MPI_PARTICLE_TYPE);
+//     // MPI_Type_commit(&MPI_PARTICLE_TYPE);
+// }
+
+// Determine optimal grid decomposition
+void determine_grid_dimensions(int num_procs, int &grid_rows, int &grid_cols) {
+  
+    // Iterate from sqrt_p down to 1 to find the best grid configuration,
+    // ensuring that the number of processes in the grid is maximized
+    // and the difference between the number of rows and columns donot exceed sqrt_p.
+    int sqrt_p = static_cast<int>(sqrt(num_procs));
+    int best_rows = 1, best_cols = num_procs;
+    int best_num = 1;
+
+    for (int rows = sqrt_p; rows >= 1; --rows) {
+        int cols = num_procs / rows;
+        if (rows * cols > num_procs) continue;
+
+        // Relaxed condition: only check if rows * cols is better
+        if (rows * cols > best_num) {
+            best_num = rows * cols;
+            best_rows = rows;
+            best_cols = cols;
+        }
+    }
+    // Handle prime case explicitly
+    if (best_num == 1){
+        best_rows = 1;
+        best_cols = num_procs;
+    }
+
+    grid_rows = best_rows;
+    grid_cols = best_cols;
+}
+
+// Classify particles after communication
+void classify_particles() {
+    std::vector<particle_t> new_local, new_ghost;
+    
+    for(auto& p : combined_particles) {
+        if(is_local(p)) {
+            new_local.push_back(p);
+        } else if(in_ghost_zone(p)) {
+            new_ghost.push_back(p);
+        }
+        // Particles outside both zones are discarded
+    }
+
+    local_particles = std::move(new_local);
+    ghost_particles = std::move(new_ghost);
+}
+
+// Initialize simulation domain and neighbors
 void init_simulation(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-	// You can use this space to initialize data objects that you may need
-	// This function will be called once before the algorithm begins
-	// Do not do any particle simulation here
+    // create_mpi_particle_type();
+    // std::cout << "simulation initiated" << std::endl;
+
+    // Create 2D process grid (row-major order)
+    determine_grid_dimensions(num_procs, grid_rows, grid_cols);
+    my_row = rank / grid_cols;
+    my_col = rank % grid_cols;
 
     bin_size = cutoff;
     num_bins_x = static_cast<int>(size / bin_size) + 1;
     num_bins_y = static_cast<int>(size / bin_size) + 1;
     bins.resize(num_bins_x, std::vector<std::vector<int>>(num_bins_y));
 
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
+    // Calculate communication margins
+    right_outer_margin = sub_xmax + cutoff;
+    left_outer_margin = sub_xmin - cutoff;
+    down_outer_margin = sub_ymax + cutoff;
+    up_outer_margin = sub_ymin - cutoff;
+
+    right_inner_margin = sub_xmax - cutoff;
+    left_inner_margin = sub_xmin + cutoff;
+    up_inner_margin = sub_ymin + cutoff;
+    down_inner_margin = sub_ymax - cutoff;
+
+    // Initialize neighbor processes
+    neighbors[LEFT]         = (my_col > 0)       ? rank - 1 : -1;
+    neighbors[RIGHT]        = (my_col < grid_cols-1) ? rank + 1 : -1;
+    neighbors[TOP]          = (my_row > 0)       ? rank - grid_cols : -1;
+    neighbors[BOTTOM]       = (my_row < grid_rows-1) ? rank + grid_cols : -1;
+    neighbors[TOP_LEFT]     = (my_col > 0 && my_row > 0) ? rank - grid_cols - 1 : -1;
+    neighbors[TOP_RIGHT]    = (my_col < grid_cols-1 && my_row > 0) ? rank - grid_cols + 1 : -1;
+    neighbors[BOTTOM_LEFT]  = (my_col > 0 && my_row < grid_rows-1) ? rank + grid_cols - 1 : -1;
+    neighbors[BOTTOM_RIGHT] = (my_col < grid_cols-1 && my_row < grid_rows-1) ? rank + grid_cols + 1 : -1;
+
+    // Initial local particles and ghost particles
+    local_particles.clear();
+    ghost_particles.clear();
+    for(int i = 0; i < num_parts; ++i) {
+        if(is_local(parts[i])) {
+            local_particles.push_back(parts[i]);
+        }
+        else if (in_ghost_zone(parts[i])) {
+            ghost_particles.push_back(parts[i]);
+        }
+    }
+
+    // // Clear combined particles
+    // combined_particles.clear();
 }
 
-void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    // Write this function
+// Particle exchange with neighbors
+void exchange_particles() {
+    constexpr int tag = 0;
+    MPI_Request send_reqs[8], recv_reqs[8];
+    std::vector<particle_t> send_buf[8];
+    std::vector<particle_t> recv_buf[8];
 
         // Clear the bins
         for (auto& row : bins) {
@@ -89,40 +207,102 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
             parts[i].ay = 0.0;
         }
 
-        // Exchange boundary particles
-        std::vector<particle_t> send_buffer, recv_buffer;
-        for (int i = 0; i < num_parts; ++i) {
-            if (parts[i].x < bin_size || parts[i].x > size - bin_size) {
-                send_buffer.push_back(parts[i]);
+        if(!is_combined(p)) {
+            combined_particles.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Non-blocking sends
+    for(int dir = 0; dir < 8; ++dir) {
+        if(neighbors[dir] == -1) continue;
+        
+        MPI_Isend(send_buf[dir].data(), send_buf[dir].size(),
+                 PARTICLE, neighbors[dir], tag, MPI_COMM_WORLD, &send_reqs[dir]);
+        // std::cout << "Sending...\n" << std::endl;
+    }
+
+    // Non-blocking receives
+    for(int dir = 0; dir < 8; ++dir) {
+        if(neighbors[dir] == -1) continue;
+
+        MPI_Status status;
+        int count;
+        MPI_Probe(neighbors[dir], tag, MPI_COMM_WORLD, &status);
+        MPI_Get_count(&status, PARTICLE, &count);
+        // std::cout << "Probe...\n" << std::endl;
+        
+        if(count > 0) {
+            recv_buf[dir].resize(count);
+            MPI_Irecv(recv_buf[dir].data(), count, PARTICLE,
+                     neighbors[dir], tag, MPI_COMM_WORLD, &recv_reqs[dir]);
+            // std::cout << "Recieving...\n" << std::endl;
+        }
+    }
+
+    // Finalize sends
+    for(int dir = 0; dir < 8; ++dir) {
+            if(neighbors[dir] != -1 && !send_buf[dir].empty()) {
+                MPI_Wait(&send_reqs[dir], MPI_STATUS_IGNORE);
             }
         }
 
-        MPI_Status status;
-        MPI_Sendrecv(&send_buffer[0], send_buffer.size(), MPI_BYTE, (rank + 1) % num_procs, 0,
-                    &recv_buffer[0], recv_buffer.size(), MPI_BYTE, (rank - 1 + num_procs) % num_procs, 0,
-                    MPI_COMM_WORLD, &status);
+    // Process received data
+    for(int dir = 0; dir < 8; ++dir) {
+        if(neighbors[dir] == -1) continue;
 
-        // Process received particles
-        for (auto& p : recv_buffer) {
-            int bin_x = static_cast<int>(p.x / bin_size);
-            int bin_y = static_cast<int>(p.y / bin_size);
-            bins[bin_x][bin_y].push_back(num_parts++);
+        if(recv_buf[dir].size() > 0) {
+            // std::cout << "Waiting...\n" << std::endl;
+            MPI_Wait(&recv_reqs[dir], MPI_STATUS_IGNORE);
+            combined_particles.insert(combined_particles.end(),
+                                     recv_buf[dir].begin(),
+                                     recv_buf[dir].end());
+            // std::cout << "Continueing...\n" << std::endl;
         }
-    
-        // Calculate forces
-        for (int x = 0; x < num_bins_x; ++x) {
-            for (int y = 0; y < num_bins_y; ++y) {
-                auto& current_bin = bins[x][y];
-                size_t size_current = current_bin.size();
-    
-                // Interactions within the current bin
-                for (size_t i = 0; i < size_current; ++i) {
-                    for (size_t j = i + 1; j < size_current; ++j) {
-                        int pi = current_bin[i];
-                        int pj = current_bin[j];
-                        apply_force(parts[pi], parts[pj]);
-                        apply_force(parts[pj], parts[pi]);
-                    }
+    }
+}
+
+// Main simulation step
+void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
+    // Combine particles for computation
+    combined_particles = local_particles;
+    combined_particles.insert(combined_particles.end(),
+                             ghost_particles.begin(),
+                             ghost_particles.end());
+
+    // Reset accelerations
+    for(auto& p : local_particles) {
+        p.ax = p.ay = 0.0;
+    }
+
+    // Bin particles for neighbor search
+    const double bin_size = cutoff;
+    const int bins_x = static_cast<int>((sub_xmax - sub_xmin)/bin_size) + 1;
+    const int bins_y = static_cast<int>((sub_ymax - sub_ymin)/bin_size) + 1;
+    std::vector<std::vector<std::vector<int>>> bins(bins_x, std::vector<std::vector<int>>(bins_y));
+
+    // Populate bins
+    for(size_t i=0; i<combined_particles.size(); ++i) {
+        const double rel_x = combined_particles[i].x - sub_xmin;
+        const double rel_y = combined_particles[i].y - sub_ymin;
+        int x = std::max(0, std::min(static_cast<int>(rel_x/bin_size), bins_x-1));
+        int y = std::max(0, std::min(static_cast<int>(rel_y/bin_size), bins_y-1));
+        bins[x][y].push_back(i);
+    }
+
+    // Compute forces
+    for(int x=0; x<bins_x; ++x) {
+        for(int y=0; y<bins_y; ++y) {
+            auto& bin = bins[x][y];
+            
+            // Intra-bin interactions
+            for(size_t i=0; i<bin.size(); ++i) {
+                for(size_t j=i+1; j<bin.size(); ++j) {
+                    particle_t& p1 = combined_particles[bin[i]];
+                    particle_t& p2 = combined_particles[bin[j]];
+                    apply_force(p1, p2);
+                    apply_force(p2, p1);
                 }
     
                 // Interactions with right bin
@@ -170,19 +350,34 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
                 }
             }
         }
-    
-        // Move particles
-        for (int i = 0; i < num_parts; ++i) {
-            move(parts[i], size);
+    }
+
+    // Move only local particles
+    for(auto& p : local_particles) {
+        move(p, size);
+    }
+
+    // Perform particle migration
+    exchange_particles();
+    classify_particles();
+}
+
+// Data gathering for output
+void gather_for_save(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
+    int local_count = local_particles.size();
+    std::vector<int> counts(num_procs), displs(num_procs);
+
+    MPI_Gather(&local_count, 1, MPI_INT, counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    if(rank == 0) {
+        displs[0] = 0;
+        for(int i=1; i<num_procs; ++i) {
+            displs[i] = displs[i-1] + counts[i-1];
         }
 
-        // Send particles that moved out of the domain
-        send_buffer.clear();
-        for (int i = 0; i < num_parts; ++i) {
-            if (parts[i].x < 0 || parts[i].x > size) {
-                send_buffer.push_back(parts[i]);
-            }
-        }
+    MPI_Gatherv(local_particles.data(), local_count, PARTICLE,
+               parts, counts.data(), displs.data(), PARTICLE,
+               0, MPI_COMM_WORLD);
 
         MPI_Sendrecv(&send_buffer[0], send_buffer.size(), MPI_BYTE, (rank + 1) % num_procs, 0,
                     &recv_buffer[0], recv_buffer.size(), MPI_BYTE, (rank - 1 + num_procs) % num_procs, 0,
