@@ -331,8 +331,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
                             const bool p2_is_local = idx_j < local_count;
 
                             // 仅当受力方是本地粒子时施加力
-                            if (p2_is_local) apply_force(p1, p2);
-                            if (p1_is_local) apply_force(p2, p1);
+                            if (p1_is_local) apply_force(p1, p2);
                         }
                     }
                 }
