@@ -284,16 +284,12 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 
     // Setup binning parameters
     const double bin_size = cutoff;
-    // const int bins_x = static_cast<int>((sub_xmax - sub_xmin) / bin_size) + 1;
-    // const int bins_y = static_cast<int>((sub_ymax - sub_ymin) / bin_size) + 1;
     const int bins_x = static_cast<int>((right_outer_margin - left_outer_margin) / bin_size) + 1;
     const int bins_y = static_cast<int>((down_outer_margin - up_outer_margin) / bin_size) + 1;
     std::vector<std::vector<std::vector<int>>> bins(bins_x, std::vector<std::vector<int>>(bins_y));
 
     // asign particles to bins
     for (size_t i = 0; i < combined_particles.size(); ++i) {
-        // const double rel_x = combined_particles[i].x - sub_xmin;
-        // const double rel_y = combined_particles[i].y - sub_ymin;
         const double rel_x = combined_particles[i].x - left_outer_margin;
         const double rel_y = combined_particles[i].y - up_outer_margin;
         int x_bin = std::max(0, std::min(static_cast<int>(rel_x / bin_size), bins_x - 1));
