@@ -7,10 +7,14 @@
 #include <mpi.h>
 #include <random>
 #include <vector>
+#include "globals.h"
 
 // =================
 // Helper Functions
 // =================
+
+double sync_time = 0.0;
+double comp_time = 0.0;
 
 // I/O routines
 void save(std::ofstream& fsave, particle_t* parts, int num_parts, double size) {
@@ -100,6 +104,7 @@ MPI_Datatype PARTICLE;
 // ==============
 
 int main(int argc, char** argv) {
+
     // Parse Args
     if (find_arg_idx(argc, argv, "-h") >= 0) {
         std::cout << "Options:" << std::endl;
@@ -175,6 +180,9 @@ int main(int argc, char** argv) {
     if (rank == 0) {
         std::cout << "Simulation Time = " << seconds << " seconds for " << num_parts
                   << " particles.\n";
+        std::cout << "Rank " << rank << " Synchronization time: " << sync_time << " seconds\n";
+        std::cout << "Rank " << rank << " Computation time: " << comp_time << " seconds\n";
+
     }
     if (fsave) {
         fsave.close();

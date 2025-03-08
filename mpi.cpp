@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <type_traits>
 #include <cstdio>
+#include <iostream>
+#include "globals.h"
 
 // 2D decomposition parameters
 static int grid_rows, grid_cols;
@@ -180,7 +182,7 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 }
 
 // Particle exchange with neighbors
-void exchange_particles() {
+void exchange_particles(int rank) {
     constexpr int tag = 0;
     MPI_Request send_reqs[8], recv_reqs[8];
     std::vector<particle_t> send_buf[8];
@@ -234,15 +236,6 @@ void exchange_particles() {
             send_buf[BOTTOM_RIGHT].push_back(p);
         }
 
-        // send_buf[TOP].push_back(p);
-        // send_buf[TOP_RIGHT].push_back(p);
-        // send_buf[TOP_LEFT].push_back(p);
-        // send_buf[RIGHT].push_back(p);
-        // send_buf[LEFT].push_back(p);
-        // send_buf[BOTTOM].push_back(p);
-        // send_buf[BOTTOM_RIGHT].push_back(p);
-        // send_buf[BOTTOM_LEFT].push_back(p);
-
         if(!is_combined(p)) {
             it = local_particles.erase(it);
         } 
@@ -255,6 +248,7 @@ void exchange_particles() {
                                 local_particles.begin(), 
                                 local_particles.end());
 
+    double sync_start = MPI_Wtime();
     // Non-blocking sends
     for(int dir = 0; dir < 8; ++dir) {
         if(neighbors[dir] == -1) continue;
@@ -328,6 +322,9 @@ void exchange_particles() {
             MPI_Wait(&send_reqs[dir], MPI_STATUS_IGNORE);
         }
     }
+
+    double sync_end = MPI_Wtime();
+    sync_time += sync_end - sync_start;
 }
 
 // Main simulation step
@@ -335,6 +332,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
     // Combined local and ghost particles for computation
 
     // Reset acceleration for local particles
+    double comp_start = MPI_Wtime();
     for (auto& p : local_particles) {
         p.ax = p.ay = 0.0;
     }
@@ -412,6 +410,8 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
         particle_t& p = combined_particles[i];
         move(p, size);
     }
+    double comp_end = MPI_Wtime();
+    comp_time += comp_end - comp_start;
 
     local_particles.assign(combined_particles.begin(), combined_particles.begin() + local_count);
     ghost_particles.assign(combined_particles.begin()+ local_count, combined_particles.end());
@@ -419,7 +419,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
     combined_particles.clear();
 
     // // Perform particle migration
-    exchange_particles();
+    exchange_particles(rank);
     classify_particles();
 }
 
